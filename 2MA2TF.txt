@@ -1,0 +1,679 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Pineify
+
+//======================================================================//
+//                    ____  _            _  __                          //
+//                   |  _ \(_)_ __   ___(_)/ _|_   _                    //
+//                   | |_) | | '_ \ / _ \ | |_| | | |                   //
+//                   |  __/| | | | |  __/ |  _| |_| |                   //
+//                   |_|   |_|_| |_|\___|_|_|  \__, |                   //
+//                                             |___/                    //
+//======================================================================//
+
+//@version=6
+indicator(title="MA Dist% Screener", overlay=false)
+
+//#region —————————————————————————————————————————————————— Custom Code
+
+//#endregion ————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Common Dependence
+
+p_ta_ma(series float source, simple int length, simple string ma_type) =>
+    switch ma_type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "RMA" => ta.rma(source, length)
+        "HMA" => ta.hma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+
+p_comm_get_display_symbol(string symbol, bool show_prefix) =>
+    string result = symbol == "" ? (syminfo.prefix + ":" + syminfo.ticker) : symbol
+    has_separator = str.contains(result, ':')
+    if not show_prefix and has_separator
+        symbol_values = str.split(result, ':')
+        result := symbol_values.get(1)
+    result
+
+
+p_comm_get_display_tf(string tf) =>
+    // Normalize input
+    s  = str.trim(tf)
+    su = str.upper(s)
+
+    // Explicit token sets (seconds & D/W/M)
+    isSecondToken = su == "1S"  or su == "5S"  or su == "10S" or su == "15S" or su == "20S" or su == "30S" or su == "45S"
+    isDWMToken    = su == "1D"  or su == "1W"  or su == "1M"  or su == "3M"  or su == "6M"  or su == "12M"
+
+    // Numeric (minutes) detection
+    numRaw = str.tonumber(su)
+    isNum  = not na(numRaw)
+    n      = isNum ? int(numRaw) : 0
+
+    // Compose result
+    result = su == "" ? "" : isSecondToken ? str.lower(su) : isDWMToken ? su : isNum ? ((n >= 60 and n % 60 == 0 and n <= 24*60) ? (str.tostring(int(n / 60)) + "h") : (str.tostring(n) + "m")) : s
+
+    ' · ' + result
+
+p_comm_get_price_format(float price) =>
+    price_str = str.tostring(price)
+    str_array = str.split(price_str, '.')
+    str_size = str_array.size()
+    if str_size == 1
+        '#'
+    else
+        format_str = array.get(str_array, 1)
+        format_str_size = str.length(format_str)
+        switch format_str_size
+            1 => '#.#'
+            2 => '#.##'
+            3 => '#.###'
+            4 => '#.####'
+            5 => '#.#####'
+            6 => '#.######'
+            7 => '#.#######'
+            8 => '#.########'
+            9 => '#.#########'
+            10 => '#.##########'
+            => '#.###############'
+
+p_comm_get_is_enabled_value(bool is_enabled) =>
+    if is_enabled
+        1
+    else
+        0
+
+// Common ta (Only Screener)
+p_ta_atr(simple int length, simple string ma_type) =>
+    p_ta_ma(ta.tr(true), length, ma_type)
+
+p_ta_bb_standard(simple int length, simple string ma_type, series float source, series float mult) =>
+    basis = p_ta_ma(source, length, ma_type)
+    dev = mult * ta.stdev(source, length)
+    upper = basis + dev
+    lower = basis - dev
+    bbr = (source - lower)/(upper - lower)
+    bbw = (upper-lower)/basis
+    [basis, upper, lower]
+
+p_ta_stoch(simple int k_length, simple int k_smoothing, simple int d_smoothing) =>
+    k = ta.sma(ta.stoch(close, high, low, k_length), k_smoothing)
+    d = ta.sma(k, d_smoothing)
+    [k, d]
+
+p_ta_smaroc(roclen, smalen) => ta.sma(ta.roc(close, roclen), smalen)
+
+p_ta_get2PoleSSF(series float src, simple int length) =>
+    PI = 2 * math.asin(1)
+    arg = math.sqrt(2) * PI / length
+    a1 = math.exp(-arg)
+    b1 = 2 * a1 * math.cos(arg)
+    c2 = b1
+    c3 = -math.pow(a1, 2)
+    c1 = 1 - c2 - c3
+    ssf = 0.0
+    ssf := c1 * src + c2 * nz(ssf[1]) + c3 * nz(ssf[2])
+    ssf
+
+p_ta_ehlers_super_smoother(series float source, simple int lower) =>
+    PI=3.14159265359
+	a1 = math.exp(-PI * math.sqrt(2) / lower)
+	coeff2 = 2 * a1 * math.cos(math.sqrt(2) * PI / lower)
+	coeff3 = -math.pow(a1, 2)
+	coeff1 = (1 - coeff2 - coeff3) / 2
+	filt = 0.0
+	filt := nz(coeff1 * (source + nz(source[1], source)) + coeff2 * filt[1] + coeff3 * nz(filt[2], filt[1]), source)
+
+p_ta_xema(series float source, simple int length) =>
+    mult = 2.0 / (length + 1.0)
+    res = float(na)
+    res := mult * source + (1.0 - mult) * nz(res[1], source)
+
+p_ta_ehlers_ema_smoother(series float source, simple int smoothK = 3, simple int smoothP = 3) =>
+    p_ta_ehlers_super_smoother(p_ta_xema(source, smoothK), smoothP)
+
+
+//#endregion ———————————————————————————————————————���—————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Ta Dependence
+
+
+//#endregion —————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Constants
+
+// Input Groups
+string P_GP_1      =      ""
+
+//#endregion —————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Inputs
+
+// Default
+string p_inp_1      =      input.symbol(defval="BTCUSD", title="Symbol 1", group=P_GP_1)
+string p_inp_2      =      input.symbol(defval="ETHUSD", title="Symbol 2", group=P_GP_1)
+string p_inp_3      =      input.symbol(defval="XRPUSD", title="Symbol 3", group=P_GP_1)
+string p_inp_4      =      input.symbol(defval="USDT", title="Symbol 4", group=P_GP_1)
+string p_inp_5      =      input.symbol(defval="BNB", title="Symbol 5", group=P_GP_1)
+string p_inp_6      =      input.symbol(defval="SOLUSD", title="Symbol 6", group=P_GP_1)
+string p_inp_7      =      input.symbol(defval="DOGEUSD", title="Symbol 7", group=P_GP_1)
+string p_inp_8      =      input.symbol(defval="TRXUSD", title="Symbol 8", group=P_GP_1)
+string p_inp_9      =      input.symbol(defval="ADAUSD", title="Symbol 9", group=P_GP_1)
+string p_inp_a      =      input.symbol(defval="WBTC", title="Symbol 10", group=P_GP_1)
+string p_inp_b      =      input.timeframe(defval="1", title="TF 1", group=P_GP_1)
+string p_inp_c      =      input.timeframe(defval="5", title="TF 2", group=P_GP_1)
+int p_inp_d         =      input.int(defval=14, title="MA1 Length", group=P_GP_1)
+string p_inp_e      =      input.string(defval="EMA", title="MA1 Type", options=["SMA", "EMA", "RMA", "HMA", "WMA", "VWMA"], group=P_GP_1)
+int p_inp_f         =      input.int(defval=21, title="MA2 Length", group=P_GP_1)
+string p_inp_g      =      input.string(defval="SMA", title="MA2 Type", options=["SMA", "EMA", "RMA", "HMA", "WMA", "VWMA"], group=P_GP_1)
+
+
+//#endregion ———————————————��———————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Screener Define
+
+var p_screener      =      table.new(position=position.middle_center, frame_color=color.rgb(54, 58, 69, 0), frame_width=0, border_color=color.rgb(255, 255, 255, 100), border_width=2, rows=9, columns=300)
+
+//#endregion ————————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Screener Indicator Function Define
+
+
+var p_screener_symbol_row_number = (1 * 2) + (1 * 2) + (1 * 2) + (1 * 2) + (1 * 2) + (1 * 2) + (1 * 2) + (1 * 2) + (1 * 2) + (1 * 2)
+var p_screener_indicator_column_number = 2
+var p_screener_page_size = 8
+var p_screener_symbol_index = 0
+var p_screener_indicator_cursor = 0
+
+p_scr_ma_distance(series float source, simple int length, simple string ma_type, series float price) =>
+    value = p_ta_ma(source, length, ma_type)
+    distance_percent = ((price - value) / price)* 100
+    [distance_percent]
+
+p_scr_ma_distance_display(series float value, simple color overbought_text_color, simple color overbought_background_color, simple color oversold_text_color, simple color oversold_background_color) =>
+    text_color = value > 0 ? overbought_text_color : oversold_text_color
+    background_color = value > 0 ? overbought_background_color : oversold_background_color
+    [str.tostring(value, "#.##") + '%', text_color, background_color]
+
+p_screener_indicator(series float p_scr_ind_1_source, simple int p_scr_ind_1_length, simple string p_scr_ind_1_maType, series float p_scr_ind_1_price) =>
+    [p_scr_ind_1_value] = p_scr_ma_distance(p_scr_ind_1_source, p_scr_ind_1_length, p_scr_ind_1_maType, p_scr_ind_1_price)
+    [p_scr_ind_1_value]
+
+
+//#endregion ——————————————————————————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Screener Table Code
+need_calculate = (last_bar_index - bar_index <= 1000)
+if need_calculate
+    p_scr_sym_1_0_enabled = true
+    p_scr_sym_1_0_symbol = p_inp_1
+    p_scr_sym_1_0_timeframe = p_inp_b
+    p_scr_sym_1_0_is_chart_tf = false
+    [p_scr_sym_1_0_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_1, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_1_0_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_1, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_1_1_enabled = true
+    p_scr_sym_1_1_symbol = p_inp_1
+    p_scr_sym_1_1_timeframe = p_inp_c
+    p_scr_sym_1_1_is_chart_tf = false
+    [p_scr_sym_1_1_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_1, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_1_1_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_1, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_2_0_enabled = true
+    p_scr_sym_2_0_symbol = p_inp_2
+    p_scr_sym_2_0_timeframe = p_inp_b
+    p_scr_sym_2_0_is_chart_tf = false
+    [p_scr_sym_2_0_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_2, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_2_0_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_2, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_2_1_enabled = true
+    p_scr_sym_2_1_symbol = p_inp_2
+    p_scr_sym_2_1_timeframe = p_inp_c
+    p_scr_sym_2_1_is_chart_tf = false
+    [p_scr_sym_2_1_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_2, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_2_1_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_2, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_3_0_enabled = true
+    p_scr_sym_3_0_symbol = p_inp_3
+    p_scr_sym_3_0_timeframe = p_inp_b
+    p_scr_sym_3_0_is_chart_tf = false
+    [p_scr_sym_3_0_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_3, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_3_0_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_3, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_3_1_enabled = true
+    p_scr_sym_3_1_symbol = p_inp_3
+    p_scr_sym_3_1_timeframe = p_inp_c
+    p_scr_sym_3_1_is_chart_tf = false
+    [p_scr_sym_3_1_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_3, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_3_1_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_3, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_4_0_enabled = true
+    p_scr_sym_4_0_symbol = p_inp_4
+    p_scr_sym_4_0_timeframe = p_inp_b
+    p_scr_sym_4_0_is_chart_tf = false
+    [p_scr_sym_4_0_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_4, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_4_0_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_4, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_4_1_enabled = true
+    p_scr_sym_4_1_symbol = p_inp_4
+    p_scr_sym_4_1_timeframe = p_inp_c
+    p_scr_sym_4_1_is_chart_tf = false
+    [p_scr_sym_4_1_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_4, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_4_1_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_4, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_5_0_enabled = true
+    p_scr_sym_5_0_symbol = p_inp_5
+    p_scr_sym_5_0_timeframe = p_inp_b
+    p_scr_sym_5_0_is_chart_tf = false
+    [p_scr_sym_5_0_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_5, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_5_0_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_5, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_5_1_enabled = true
+    p_scr_sym_5_1_symbol = p_inp_5
+    p_scr_sym_5_1_timeframe = p_inp_c
+    p_scr_sym_5_1_is_chart_tf = false
+    [p_scr_sym_5_1_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_5, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_5_1_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_5, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_6_0_enabled = true
+    p_scr_sym_6_0_symbol = p_inp_6
+    p_scr_sym_6_0_timeframe = p_inp_b
+    p_scr_sym_6_0_is_chart_tf = false
+    [p_scr_sym_6_0_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_6, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_6_0_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_6, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_6_1_enabled = true
+    p_scr_sym_6_1_symbol = p_inp_6
+    p_scr_sym_6_1_timeframe = p_inp_c
+    p_scr_sym_6_1_is_chart_tf = false
+    [p_scr_sym_6_1_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_6, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_6_1_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_6, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_7_0_enabled = true
+    p_scr_sym_7_0_symbol = p_inp_7
+    p_scr_sym_7_0_timeframe = p_inp_b
+    p_scr_sym_7_0_is_chart_tf = false
+    [p_scr_sym_7_0_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_7, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_7_0_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_7, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_7_1_enabled = true
+    p_scr_sym_7_1_symbol = p_inp_7
+    p_scr_sym_7_1_timeframe = p_inp_c
+    p_scr_sym_7_1_is_chart_tf = false
+    [p_scr_sym_7_1_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_7, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_7_1_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_7, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_8_0_enabled = true
+    p_scr_sym_8_0_symbol = p_inp_8
+    p_scr_sym_8_0_timeframe = p_inp_b
+    p_scr_sym_8_0_is_chart_tf = false
+    [p_scr_sym_8_0_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_8, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_8_0_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_8, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_8_1_enabled = true
+    p_scr_sym_8_1_symbol = p_inp_8
+    p_scr_sym_8_1_timeframe = p_inp_c
+    p_scr_sym_8_1_is_chart_tf = false
+    [p_scr_sym_8_1_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_8, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_8_1_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_8, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_9_0_enabled = true
+    p_scr_sym_9_0_symbol = p_inp_9
+    p_scr_sym_9_0_timeframe = p_inp_b
+    p_scr_sym_9_0_is_chart_tf = false
+    [p_scr_sym_9_0_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_9, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_9_0_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_9, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_9_1_enabled = true
+    p_scr_sym_9_1_symbol = p_inp_9
+    p_scr_sym_9_1_timeframe = p_inp_c
+    p_scr_sym_9_1_is_chart_tf = false
+    [p_scr_sym_9_1_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_9, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_9_1_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_9, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_a_0_enabled = true
+    p_scr_sym_a_0_symbol = p_inp_a
+    p_scr_sym_a_0_timeframe = p_inp_b
+    p_scr_sym_a_0_is_chart_tf = false
+    [p_scr_sym_a_0_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_a, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_a_0_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_a, timeframe=p_inp_b, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    p_scr_sym_a_1_enabled = true
+    p_scr_sym_a_1_symbol = p_inp_a
+    p_scr_sym_a_1_timeframe = p_inp_c
+    p_scr_sym_a_1_is_chart_tf = false
+    [p_scr_sym_a_1_0_p_scr_ma_distance_value] = request.security(symbol=p_inp_a, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_d, p_inp_e, close))
+    [p_scr_sym_a_1_1_p_scr_ma_distance_value] = request.security(symbol=p_inp_a, timeframe=p_inp_c, expression=p_screener_indicator(close, p_inp_f, p_inp_g, close))
+    
+    if barstate.islast
+        p_tmp_1 = 'ignore_me'
+        p_screener_symbol_index := 0
+        p_tmp_3 = int(p_screener_symbol_row_number / p_screener_page_size)
+        p_screener_page_number = p_screener_symbol_row_number > (p_tmp_3 * p_screener_page_size) ? p_tmp_3 + 1 : p_tmp_3
+        for p_tmp_2 = 0 to p_screener_page_number - 1
+            table.cell(table_id=p_screener,column=(1 + p_screener_indicator_column_number) * p_tmp_2,row=0,text="Symbol",text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+        if p_scr_sym_1_0_enabled
+            p_tmp_4 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_5 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_5,row=p_tmp_4,text=p_comm_get_display_symbol(p_scr_sym_1_0_symbol, false) + (p_scr_sym_1_0_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_1_0_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_1_1_enabled
+            p_tmp_6 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_7 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_7,row=p_tmp_6,text=p_comm_get_display_symbol(p_scr_sym_1_1_symbol, false) + (p_scr_sym_1_1_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_1_1_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_2_0_enabled
+            p_tmp_8 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_9 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_9,row=p_tmp_8,text=p_comm_get_display_symbol(p_scr_sym_2_0_symbol, false) + (p_scr_sym_2_0_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_2_0_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_2_1_enabled
+            p_tmp_a = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_b = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_b,row=p_tmp_a,text=p_comm_get_display_symbol(p_scr_sym_2_1_symbol, false) + (p_scr_sym_2_1_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_2_1_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_3_0_enabled
+            p_tmp_c = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_d = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_d,row=p_tmp_c,text=p_comm_get_display_symbol(p_scr_sym_3_0_symbol, false) + (p_scr_sym_3_0_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_3_0_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_3_1_enabled
+            p_tmp_e = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_f = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_f,row=p_tmp_e,text=p_comm_get_display_symbol(p_scr_sym_3_1_symbol, false) + (p_scr_sym_3_1_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_3_1_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_4_0_enabled
+            p_tmp_g = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_h = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_h,row=p_tmp_g,text=p_comm_get_display_symbol(p_scr_sym_4_0_symbol, false) + (p_scr_sym_4_0_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_4_0_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_4_1_enabled
+            p_tmp_i = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_j = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_j,row=p_tmp_i,text=p_comm_get_display_symbol(p_scr_sym_4_1_symbol, false) + (p_scr_sym_4_1_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_4_1_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_5_0_enabled
+            p_tmp_k = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_l = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_l,row=p_tmp_k,text=p_comm_get_display_symbol(p_scr_sym_5_0_symbol, false) + (p_scr_sym_5_0_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_5_0_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_5_1_enabled
+            p_tmp_m = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_n = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_n,row=p_tmp_m,text=p_comm_get_display_symbol(p_scr_sym_5_1_symbol, false) + (p_scr_sym_5_1_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_5_1_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_6_0_enabled
+            p_tmp_o = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_p = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_p,row=p_tmp_o,text=p_comm_get_display_symbol(p_scr_sym_6_0_symbol, false) + (p_scr_sym_6_0_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_6_0_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_6_1_enabled
+            p_tmp_q = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_r = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_r,row=p_tmp_q,text=p_comm_get_display_symbol(p_scr_sym_6_1_symbol, false) + (p_scr_sym_6_1_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_6_1_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_7_0_enabled
+            p_tmp_s = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_t = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_t,row=p_tmp_s,text=p_comm_get_display_symbol(p_scr_sym_7_0_symbol, false) + (p_scr_sym_7_0_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_7_0_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_7_1_enabled
+            p_tmp_u = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_v = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_v,row=p_tmp_u,text=p_comm_get_display_symbol(p_scr_sym_7_1_symbol, false) + (p_scr_sym_7_1_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_7_1_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_8_0_enabled
+            p_tmp_w = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_x = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_x,row=p_tmp_w,text=p_comm_get_display_symbol(p_scr_sym_8_0_symbol, false) + (p_scr_sym_8_0_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_8_0_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_8_1_enabled
+            p_tmp_y = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_z = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_z,row=p_tmp_y,text=p_comm_get_display_symbol(p_scr_sym_8_1_symbol, false) + (p_scr_sym_8_1_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_8_1_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_9_0_enabled
+            p_tmp_10 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_11 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_11,row=p_tmp_10,text=p_comm_get_display_symbol(p_scr_sym_9_0_symbol, false) + (p_scr_sym_9_0_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_9_0_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_9_1_enabled
+            p_tmp_12 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_13 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_13,row=p_tmp_12,text=p_comm_get_display_symbol(p_scr_sym_9_1_symbol, false) + (p_scr_sym_9_1_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_9_1_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_a_0_enabled
+            p_tmp_14 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_15 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_15,row=p_tmp_14,text=p_comm_get_display_symbol(p_scr_sym_a_0_symbol, false) + (p_scr_sym_a_0_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_a_0_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_a_1_enabled
+            p_tmp_16 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_17 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number)
+            table.cell(table_id=p_screener,column=p_tmp_17,row=p_tmp_16,text=p_comm_get_display_symbol(p_scr_sym_a_1_symbol, false) + (p_scr_sym_a_1_is_chart_tf ? '' : p_comm_get_display_tf(p_scr_sym_a_1_timeframe)),text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        for p_tmp_18 = 0 to p_screener_page_number - 1
+            p_screener_indicator_cursor := 0
+            if true
+                p_screener_indicator_cursor := p_screener_indicator_cursor + 1
+                table.cell(table_id=p_screener,column=p_tmp_18 * (1 + p_screener_indicator_column_number) + p_screener_indicator_cursor,row=0,text="MA1 Dist%",text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+            if true
+                p_screener_indicator_cursor := p_screener_indicator_cursor + 1
+                table.cell(table_id=p_screener,column=p_tmp_18 * (1 + p_screener_indicator_column_number) + p_screener_indicator_cursor,row=0,text="MA2 Dist%",text_color=color.rgb(255, 255, 255, 0),text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=color.rgb(120, 123, 134, 0),text_font_family=font.family_default,text_formatting=text.format_none)
+        p_screener_indicator_cursor := 0
+        if true
+            p_screener_indicator_cursor := p_screener_indicator_cursor + 1
+        if true
+            p_screener_indicator_cursor := p_screener_indicator_cursor + 1
+        p_screener_symbol_index := 0
+        if p_scr_sym_1_0_enabled and true
+            p_tmp_1a = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_1b = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_19_text, p_tmp_19_textColor, p_tmp_19_bgColor] = p_scr_ma_distance_display(p_scr_sym_1_0_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_1b,row=p_tmp_1a,text=p_tmp_19_text,text_color=p_tmp_19_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_19_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_1c = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_1d = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_1e_text, p_tmp_1e_textColor, p_tmp_1e_bgColor] = p_scr_ma_distance_display(p_scr_sym_1_0_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_1d,row=p_tmp_1c,text=p_tmp_1e_text,text_color=p_tmp_1e_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_1e_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_1_1_enabled and true
+            p_tmp_1f = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_1g = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_1h_text, p_tmp_1h_textColor, p_tmp_1h_bgColor] = p_scr_ma_distance_display(p_scr_sym_1_1_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_1g,row=p_tmp_1f,text=p_tmp_1h_text,text_color=p_tmp_1h_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_1h_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_1i = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_1j = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_1k_text, p_tmp_1k_textColor, p_tmp_1k_bgColor] = p_scr_ma_distance_display(p_scr_sym_1_1_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_1j,row=p_tmp_1i,text=p_tmp_1k_text,text_color=p_tmp_1k_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_1k_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_2_0_enabled and true
+            p_tmp_1l = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_1m = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_1n_text, p_tmp_1n_textColor, p_tmp_1n_bgColor] = p_scr_ma_distance_display(p_scr_sym_2_0_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_1m,row=p_tmp_1l,text=p_tmp_1n_text,text_color=p_tmp_1n_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_1n_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_1o = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_1p = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_1q_text, p_tmp_1q_textColor, p_tmp_1q_bgColor] = p_scr_ma_distance_display(p_scr_sym_2_0_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_1p,row=p_tmp_1o,text=p_tmp_1q_text,text_color=p_tmp_1q_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_1q_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_2_1_enabled and true
+            p_tmp_1r = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_1s = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_1t_text, p_tmp_1t_textColor, p_tmp_1t_bgColor] = p_scr_ma_distance_display(p_scr_sym_2_1_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_1s,row=p_tmp_1r,text=p_tmp_1t_text,text_color=p_tmp_1t_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_1t_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_1u = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_1v = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_1w_text, p_tmp_1w_textColor, p_tmp_1w_bgColor] = p_scr_ma_distance_display(p_scr_sym_2_1_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_1v,row=p_tmp_1u,text=p_tmp_1w_text,text_color=p_tmp_1w_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_1w_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_3_0_enabled and true
+            p_tmp_1x = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_1y = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_1z_text, p_tmp_1z_textColor, p_tmp_1z_bgColor] = p_scr_ma_distance_display(p_scr_sym_3_0_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_1y,row=p_tmp_1x,text=p_tmp_1z_text,text_color=p_tmp_1z_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_1z_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_20 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_21 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_22_text, p_tmp_22_textColor, p_tmp_22_bgColor] = p_scr_ma_distance_display(p_scr_sym_3_0_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_21,row=p_tmp_20,text=p_tmp_22_text,text_color=p_tmp_22_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_22_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_3_1_enabled and true
+            p_tmp_23 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_24 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_25_text, p_tmp_25_textColor, p_tmp_25_bgColor] = p_scr_ma_distance_display(p_scr_sym_3_1_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_24,row=p_tmp_23,text=p_tmp_25_text,text_color=p_tmp_25_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_25_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_26 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_27 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_28_text, p_tmp_28_textColor, p_tmp_28_bgColor] = p_scr_ma_distance_display(p_scr_sym_3_1_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_27,row=p_tmp_26,text=p_tmp_28_text,text_color=p_tmp_28_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_28_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_4_0_enabled and true
+            p_tmp_29 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_2a = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_2b_text, p_tmp_2b_textColor, p_tmp_2b_bgColor] = p_scr_ma_distance_display(p_scr_sym_4_0_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_2a,row=p_tmp_29,text=p_tmp_2b_text,text_color=p_tmp_2b_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_2b_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_2c = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_2d = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_2e_text, p_tmp_2e_textColor, p_tmp_2e_bgColor] = p_scr_ma_distance_display(p_scr_sym_4_0_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_2d,row=p_tmp_2c,text=p_tmp_2e_text,text_color=p_tmp_2e_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_2e_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_4_1_enabled and true
+            p_tmp_2f = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_2g = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_2h_text, p_tmp_2h_textColor, p_tmp_2h_bgColor] = p_scr_ma_distance_display(p_scr_sym_4_1_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_2g,row=p_tmp_2f,text=p_tmp_2h_text,text_color=p_tmp_2h_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_2h_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_2i = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_2j = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_2k_text, p_tmp_2k_textColor, p_tmp_2k_bgColor] = p_scr_ma_distance_display(p_scr_sym_4_1_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_2j,row=p_tmp_2i,text=p_tmp_2k_text,text_color=p_tmp_2k_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_2k_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_5_0_enabled and true
+            p_tmp_2l = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_2m = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_2n_text, p_tmp_2n_textColor, p_tmp_2n_bgColor] = p_scr_ma_distance_display(p_scr_sym_5_0_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_2m,row=p_tmp_2l,text=p_tmp_2n_text,text_color=p_tmp_2n_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_2n_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_2o = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_2p = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_2q_text, p_tmp_2q_textColor, p_tmp_2q_bgColor] = p_scr_ma_distance_display(p_scr_sym_5_0_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_2p,row=p_tmp_2o,text=p_tmp_2q_text,text_color=p_tmp_2q_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_2q_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_5_1_enabled and true
+            p_tmp_2r = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_2s = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_2t_text, p_tmp_2t_textColor, p_tmp_2t_bgColor] = p_scr_ma_distance_display(p_scr_sym_5_1_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_2s,row=p_tmp_2r,text=p_tmp_2t_text,text_color=p_tmp_2t_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_2t_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_2u = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_2v = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_2w_text, p_tmp_2w_textColor, p_tmp_2w_bgColor] = p_scr_ma_distance_display(p_scr_sym_5_1_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_2v,row=p_tmp_2u,text=p_tmp_2w_text,text_color=p_tmp_2w_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_2w_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_6_0_enabled and true
+            p_tmp_2x = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_2y = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_2z_text, p_tmp_2z_textColor, p_tmp_2z_bgColor] = p_scr_ma_distance_display(p_scr_sym_6_0_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_2y,row=p_tmp_2x,text=p_tmp_2z_text,text_color=p_tmp_2z_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_2z_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_30 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_31 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_32_text, p_tmp_32_textColor, p_tmp_32_bgColor] = p_scr_ma_distance_display(p_scr_sym_6_0_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_31,row=p_tmp_30,text=p_tmp_32_text,text_color=p_tmp_32_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_32_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_6_1_enabled and true
+            p_tmp_33 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_34 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_35_text, p_tmp_35_textColor, p_tmp_35_bgColor] = p_scr_ma_distance_display(p_scr_sym_6_1_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_34,row=p_tmp_33,text=p_tmp_35_text,text_color=p_tmp_35_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_35_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_36 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_37 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_38_text, p_tmp_38_textColor, p_tmp_38_bgColor] = p_scr_ma_distance_display(p_scr_sym_6_1_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_37,row=p_tmp_36,text=p_tmp_38_text,text_color=p_tmp_38_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_38_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_7_0_enabled and true
+            p_tmp_39 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_3a = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_3b_text, p_tmp_3b_textColor, p_tmp_3b_bgColor] = p_scr_ma_distance_display(p_scr_sym_7_0_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_3a,row=p_tmp_39,text=p_tmp_3b_text,text_color=p_tmp_3b_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_3b_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_3c = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_3d = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_3e_text, p_tmp_3e_textColor, p_tmp_3e_bgColor] = p_scr_ma_distance_display(p_scr_sym_7_0_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_3d,row=p_tmp_3c,text=p_tmp_3e_text,text_color=p_tmp_3e_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_3e_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_7_1_enabled and true
+            p_tmp_3f = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_3g = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_3h_text, p_tmp_3h_textColor, p_tmp_3h_bgColor] = p_scr_ma_distance_display(p_scr_sym_7_1_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_3g,row=p_tmp_3f,text=p_tmp_3h_text,text_color=p_tmp_3h_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_3h_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_3i = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_3j = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_3k_text, p_tmp_3k_textColor, p_tmp_3k_bgColor] = p_scr_ma_distance_display(p_scr_sym_7_1_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_3j,row=p_tmp_3i,text=p_tmp_3k_text,text_color=p_tmp_3k_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_3k_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_8_0_enabled and true
+            p_tmp_3l = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_3m = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_3n_text, p_tmp_3n_textColor, p_tmp_3n_bgColor] = p_scr_ma_distance_display(p_scr_sym_8_0_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_3m,row=p_tmp_3l,text=p_tmp_3n_text,text_color=p_tmp_3n_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_3n_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_3o = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_3p = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_3q_text, p_tmp_3q_textColor, p_tmp_3q_bgColor] = p_scr_ma_distance_display(p_scr_sym_8_0_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_3p,row=p_tmp_3o,text=p_tmp_3q_text,text_color=p_tmp_3q_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_3q_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_8_1_enabled and true
+            p_tmp_3r = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_3s = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_3t_text, p_tmp_3t_textColor, p_tmp_3t_bgColor] = p_scr_ma_distance_display(p_scr_sym_8_1_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_3s,row=p_tmp_3r,text=p_tmp_3t_text,text_color=p_tmp_3t_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_3t_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_3u = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_3v = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_3w_text, p_tmp_3w_textColor, p_tmp_3w_bgColor] = p_scr_ma_distance_display(p_scr_sym_8_1_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_3v,row=p_tmp_3u,text=p_tmp_3w_text,text_color=p_tmp_3w_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_3w_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_9_0_enabled and true
+            p_tmp_3x = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_3y = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_3z_text, p_tmp_3z_textColor, p_tmp_3z_bgColor] = p_scr_ma_distance_display(p_scr_sym_9_0_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_3y,row=p_tmp_3x,text=p_tmp_3z_text,text_color=p_tmp_3z_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_3z_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_40 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_41 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_42_text, p_tmp_42_textColor, p_tmp_42_bgColor] = p_scr_ma_distance_display(p_scr_sym_9_0_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_41,row=p_tmp_40,text=p_tmp_42_text,text_color=p_tmp_42_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_42_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_9_1_enabled and true
+            p_tmp_43 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_44 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_45_text, p_tmp_45_textColor, p_tmp_45_bgColor] = p_scr_ma_distance_display(p_scr_sym_9_1_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_44,row=p_tmp_43,text=p_tmp_45_text,text_color=p_tmp_45_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_45_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_46 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_47 = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_48_text, p_tmp_48_textColor, p_tmp_48_bgColor] = p_scr_ma_distance_display(p_scr_sym_9_1_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_47,row=p_tmp_46,text=p_tmp_48_text,text_color=p_tmp_48_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_48_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_a_0_enabled and true
+            p_tmp_49 = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_4a = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_4b_text, p_tmp_4b_textColor, p_tmp_4b_bgColor] = p_scr_ma_distance_display(p_scr_sym_a_0_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_4a,row=p_tmp_49,text=p_tmp_4b_text,text_color=p_tmp_4b_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_4b_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_4c = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_4d = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_4e_text, p_tmp_4e_textColor, p_tmp_4e_bgColor] = p_scr_ma_distance_display(p_scr_sym_a_0_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_4d,row=p_tmp_4c,text=p_tmp_4e_text,text_color=p_tmp_4e_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_4e_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+        if p_scr_sym_a_1_enabled and true
+            p_tmp_4f = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_4g = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 1
+            [p_tmp_4h_text, p_tmp_4h_textColor, p_tmp_4h_bgColor] = p_scr_ma_distance_display(p_scr_sym_a_1_0_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_4g,row=p_tmp_4f,text=p_tmp_4h_text,text_color=p_tmp_4h_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_4h_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_tmp_4i = (p_screener_symbol_index % p_screener_page_size) + 1
+            p_tmp_4j = int(p_screener_symbol_index / p_screener_page_size) * (1 + p_screener_indicator_column_number) + 2
+            [p_tmp_4k_text, p_tmp_4k_textColor, p_tmp_4k_bgColor] = p_scr_ma_distance_display(p_scr_sym_a_1_1_p_scr_ma_distance_value, color.rgb(255, 255, 255, 0), color.rgb(76, 175, 80, 0), color.rgb(255, 255, 255, 0), color.rgb(242, 54, 69, 0))
+            table.cell(table_id=p_screener,column=p_tmp_4j,row=p_tmp_4i,text=p_tmp_4k_text,text_color=p_tmp_4k_textColor,text_size=size.normal,text_valign=text.align_center,text_halign=text.align_center,bgcolor=p_tmp_4k_bgColor,text_font_family=font.family_default,text_formatting=text.format_none)
+            p_screener_symbol_index := p_screener_symbol_index + 1
+
+//#endregion ———————————————————————————————————————————————————————————————————
